@@ -23,7 +23,6 @@ import asyncio
 import json
 import logging
 import os
-import time
 from contextlib import suppress
 from datetime import UTC, datetime
 from typing import Any
@@ -31,6 +30,10 @@ from urllib.parse import quote
 
 import aiohttp
 from aiohttp import web
+
+# Tracks the most recent successful command for monitoring/debugging purposes
+# (e.g. confirming the phone-side scheduler actually fired at the right time).
+_last_command: dict[str, Any] = {"action": None, "params": None, "timestamp": None}
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 _LOGGER = logging.getLogger("betaflo")
@@ -230,18 +233,13 @@ class _FloLogicSession:
         return self._ws is not None and not self._ws.closed
 
     async def _connect(self, email: str, password: str):
-        t0 = time.monotonic()
         await self._close()
         headers = {**DEFAULT_HEADERS}
         session = aiohttp.ClientSession()
         try:
-            t1 = time.monotonic()
             token = await _negotiate(session, headers)
-            t2 = time.monotonic()
             ws = await _open_ws(session, token, headers)
-            t3 = time.monotonic()
             user, valve, relog_token = await _login(ws, email, password, headers)
-            t4 = time.monotonic()
             headers["relogToken"] = relog_token
         except Exception:
             with suppress(Exception):
@@ -249,11 +247,7 @@ class _FloLogicSession:
             raise
         self._session, self._ws = session, ws
         self._user, self._valve, self._headers = user, valve, headers
-        _LOGGER.info(
-            "FloLogic: new session established | close=%.2fs negotiate=%.2fs "
-            "ws_open=%.2fs login=%.2fs total=%.2fs",
-            t1 - t0, t2 - t1, t3 - t2, t4 - t3, t4 - t0,
-        )
+        _LOGGER.info("FloLogic: new session established")
 
     async def _close(self):
         if self._ws is not None:
@@ -265,32 +259,18 @@ class _FloLogicSession:
         self._session = self._ws = self._user = self._valve = None
 
     async def run(self, email: str, password: str, action):
-        t_start = time.monotonic()
         async with self._lock:
-            reused = self._connected()
-            if not reused:
-                _LOGGER.info("FloLogic: no live session (connected=%s) — reconnecting",
-                              reused)
+            if not self._connected():
                 await self._connect(email, password)
-            else:
-                _LOGGER.info("FloLogic: reusing existing session")
             try:
                 # Refresh valve snapshot so callers see current state
-                t_action0 = time.monotonic()
-                result = await action(self._ws, self._user, self._valve)
-                _LOGGER.info("FloLogic: action took %.2fs (reused=%s), total run() %.2fs",
-                             time.monotonic() - t_action0, reused, time.monotonic() - t_start)
-                return result
+                return await action(self._ws, self._user, self._valve)
             except Exception:
                 # Connection may have gone stale (FloLogic timed it out,
                 # network blip, etc). Reconnect once and retry the action.
                 _LOGGER.warning("FloLogic: session appears stale, reconnecting")
                 await self._connect(email, password)
-                t_action0 = time.monotonic()
-                result = await action(self._ws, self._user, self._valve)
-                _LOGGER.info("FloLogic: retry action took %.2fs, total run() %.2fs",
-                             time.monotonic() - t_action0, time.monotonic() - t_start)
-                return result
+                return await action(self._ws, self._user, self._valve)
 
 
 _flologic_session = _FloLogicSession()
@@ -321,6 +301,12 @@ async def _state_change(ws, user, valve, fields: dict) -> None:
     # Patch our cached valve dict in place so a /status call right after this
     # reflects the change, since we no longer re-fetch on every request.
     valve.update(fields)
+    # Record this command for monitoring (e.g. confirming the phone-side
+    # scheduler actually fired, and when).
+    now = datetime.now(UTC)
+    _last_command["action"] = ", ".join(f"{k}={v}" for k, v in fields.items())
+    _last_command["params"] = fields
+    _last_command["timestamp"] = now.isoformat()
 
 
 def _mode_name(v) -> str:
@@ -353,6 +339,8 @@ async def fetch_status(email, password):
             "temperature": valve.get("temperature"),
             "valve_name": (valve.get("valveFriendlyName")
                            or valve.get("combinedName") or "FloLogic"),
+            "last_command": _last_command["action"],
+            "last_command_time_utc": _last_command["timestamp"],
         }
     return await _with_flologic(email, password, action)
 
