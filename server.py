@@ -228,7 +228,14 @@ async def _state_change(ws, user, valve, fields: dict) -> None:
         **fields,
     }
     await ws.send_str(_frame("RequestStateChange", user, valve, command))
-    await _wait_for_event(ws, "StateChangeResult", timeout=45)
+    # We don't wait for FloLogic's StateChangeResult confirmation — in practice
+    # it often never arrives on this connection (likely because FloLogic only
+    # pushes it to the session it considers "active", e.g. the official app),
+    # even though the command itself reliably goes through. Waiting up to 45s
+    # for it was causing false-negative errors AND holding this session open
+    # far longer than necessary, which was a likely contributor to kicking the
+    # official FloLogic app's session. A short flush delay is enough.
+    await asyncio.sleep(1.5)
 
 
 def _mode_name(v) -> str:
@@ -392,3 +399,4 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
     _LOGGER.info("BetaFlo server starting on port %d", port)
     web.run_app(create_app(), port=port)
+ 'Fix StateChangeResult timeout' 
