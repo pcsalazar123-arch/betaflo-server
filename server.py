@@ -203,20 +203,78 @@ async def _login(ws, email: str, password: str, headers: dict):
     return user, valve, relog_token
 
 
-async def _with_flologic(email: str, password: str, action):
-    """Open a session, log in, run action(ws, user, valve), close."""
-    headers = {**DEFAULT_HEADERS}
-    async with aiohttp.ClientSession() as session:
-        token = await _negotiate(session, headers)
-        ws = await _open_ws(session, token, headers)
+class _FloLogicSession:
+    """
+    Keeps one logged-in FloLogic connection alive across requests instead of
+    doing a full negotiate -> connect -> login cycle every single time.
+
+    That full login cycle was taking ~30s per request AND was the most
+    likely cause of the official FloLogic app losing its session (repeatedly
+    re-authenticating the same account looks like a new device grabbing the
+    session each time). Reusing one connection avoids both problems.
+
+    A lock serializes calls so two overlapping HTTP requests can't stomp on
+    the same websocket at once.
+    """
+
+    def __init__(self):
+        self._session: aiohttp.ClientSession | None = None
+        self._ws: aiohttp.ClientWebSocketResponse | None = None
+        self._user = None
+        self._valve = None
+        self._headers = None
+        self._lock = asyncio.Lock()
+
+    def _connected(self) -> bool:
+        return self._ws is not None and not self._ws.closed
+
+    async def _connect(self, email: str, password: str):
+        await self._close()
+        headers = {**DEFAULT_HEADERS}
+        session = aiohttp.ClientSession()
         try:
+            token = await _negotiate(session, headers)
+            ws = await _open_ws(session, token, headers)
             user, valve, relog_token = await _login(ws, email, password, headers)
-            # Update relog token for subsequent calls
             headers["relogToken"] = relog_token
-            return await action(ws, user, valve)
-        finally:
+        except Exception:
             with suppress(Exception):
-                await ws.close()
+                await session.close()
+            raise
+        self._session, self._ws = session, ws
+        self._user, self._valve, self._headers = user, valve, headers
+        _LOGGER.info("FloLogic: new session established")
+
+    async def _close(self):
+        if self._ws is not None:
+            with suppress(Exception):
+                await self._ws.close()
+        if self._session is not None:
+            with suppress(Exception):
+                await self._session.close()
+        self._session = self._ws = self._user = self._valve = None
+
+    async def run(self, email: str, password: str, action):
+        async with self._lock:
+            if not self._connected():
+                await self._connect(email, password)
+            try:
+                # Refresh valve snapshot so callers see current state
+                return await action(self._ws, self._user, self._valve)
+            except Exception:
+                # Connection may have gone stale (FloLogic timed it out,
+                # network blip, etc). Reconnect once and retry the action.
+                _LOGGER.warning("FloLogic: session appears stale, reconnecting")
+                await self._connect(email, password)
+                return await action(self._ws, self._user, self._valve)
+
+
+_flologic_session = _FloLogicSession()
+
+
+async def _with_flologic(email: str, password: str, action):
+    """Run action(ws, user, valve) against the shared, reused FloLogic session."""
+    return await _flologic_session.run(email, password, action)
 
 
 async def _state_change(ws, user, valve, fields: dict) -> None:
@@ -236,6 +294,9 @@ async def _state_change(ws, user, valve, fields: dict) -> None:
     # far longer than necessary, which was a likely contributor to kicking the
     # official FloLogic app's session. A short flush delay is enough.
     await asyncio.sleep(1.5)
+    # Patch our cached valve dict in place so a /status call right after this
+    # reflects the change, since we no longer re-fetch on every request.
+    valve.update(fields)
 
 
 def _mode_name(v) -> str:
