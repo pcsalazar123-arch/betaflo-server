@@ -23,6 +23,7 @@ import asyncio
 import json
 import logging
 import os
+import time
 from contextlib import suppress
 from datetime import UTC, datetime
 from typing import Any
@@ -229,13 +230,18 @@ class _FloLogicSession:
         return self._ws is not None and not self._ws.closed
 
     async def _connect(self, email: str, password: str):
+        t0 = time.monotonic()
         await self._close()
         headers = {**DEFAULT_HEADERS}
         session = aiohttp.ClientSession()
         try:
+            t1 = time.monotonic()
             token = await _negotiate(session, headers)
+            t2 = time.monotonic()
             ws = await _open_ws(session, token, headers)
+            t3 = time.monotonic()
             user, valve, relog_token = await _login(ws, email, password, headers)
+            t4 = time.monotonic()
             headers["relogToken"] = relog_token
         except Exception:
             with suppress(Exception):
@@ -243,7 +249,11 @@ class _FloLogicSession:
             raise
         self._session, self._ws = session, ws
         self._user, self._valve, self._headers = user, valve, headers
-        _LOGGER.info("FloLogic: new session established")
+        _LOGGER.info(
+            "FloLogic: new session established | close=%.2fs negotiate=%.2fs "
+            "ws_open=%.2fs login=%.2fs total=%.2fs",
+            t1 - t0, t2 - t1, t3 - t2, t4 - t3, t4 - t0,
+        )
 
     async def _close(self):
         if self._ws is not None:
@@ -255,18 +265,32 @@ class _FloLogicSession:
         self._session = self._ws = self._user = self._valve = None
 
     async def run(self, email: str, password: str, action):
+        t_start = time.monotonic()
         async with self._lock:
-            if not self._connected():
+            reused = self._connected()
+            if not reused:
+                _LOGGER.info("FloLogic: no live session (connected=%s) — reconnecting",
+                              reused)
                 await self._connect(email, password)
+            else:
+                _LOGGER.info("FloLogic: reusing existing session")
             try:
                 # Refresh valve snapshot so callers see current state
-                return await action(self._ws, self._user, self._valve)
+                t_action0 = time.monotonic()
+                result = await action(self._ws, self._user, self._valve)
+                _LOGGER.info("FloLogic: action took %.2fs (reused=%s), total run() %.2fs",
+                             time.monotonic() - t_action0, reused, time.monotonic() - t_start)
+                return result
             except Exception:
                 # Connection may have gone stale (FloLogic timed it out,
                 # network blip, etc). Reconnect once and retry the action.
                 _LOGGER.warning("FloLogic: session appears stale, reconnecting")
                 await self._connect(email, password)
-                return await action(self._ws, self._user, self._valve)
+                t_action0 = time.monotonic()
+                result = await action(self._ws, self._user, self._valve)
+                _LOGGER.info("FloLogic: retry action took %.2fs, total run() %.2fs",
+                             time.monotonic() - t_action0, time.monotonic() - t_start)
+                return result
 
 
 _flologic_session = _FloLogicSession()
