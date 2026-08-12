@@ -27,6 +27,7 @@ from contextlib import suppress
 from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import quote
+from zoneinfo import ZoneInfo
 
 import aiohttp
 from aiohttp import web
@@ -34,6 +35,13 @@ from aiohttp import web
 # Tracks the most recent successful command for monitoring/debugging purposes
 # (e.g. confirming the phone-side scheduler actually fired at the right time).
 _last_command: dict[str, Any] = {"action": None, "params": None, "timestamp": None}
+
+# ── Schedule configuration ────────────────────────────────────────────────────
+TZ = ZoneInfo("America/Los_Angeles")
+SCHEDULE = [
+    (6,  0,  "set_home", 45),   # 6:00 AM  → home limit 45 min
+    (21, 45, "set_home", 7),    # 9:45 PM  → home limit 7 min
+]
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 _LOGGER = logging.getLogger("betaflo")
@@ -455,6 +463,74 @@ async def handle_set_sensitivity(r):
     except Exception as e: _LOGGER.exception("Error in /set_sensitivity"); return _ok({"ok": False, "error": str(e)})
 
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Scheduler
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def _run_scheduler():
+    """Check the schedule every minute and fire changes at the right time."""
+    _LOGGER.info("Scheduler started — running daily at 6:00 AM and 9:45 PM Pacific")
+    fired_today: set[tuple] = set()
+
+    while True:
+        now = datetime.now(TZ)
+        today_key = now.date()
+
+        for (hour, minute, action, value) in SCHEDULE:
+            job_key = (today_key, hour, minute)
+            if job_key in fired_today:
+                continue
+            if now.hour == hour and now.minute == minute:
+                fired_today.add(job_key)
+                _LOGGER.info("Scheduler firing: %s = %s at %02d:%02d Pacific",
+                             action, value, hour, minute)
+                try:
+                    email    = os.environ.get("FLOLOGIC_EMAIL", "")
+                    password = os.environ.get("FLOLOGIC_PASSWORD", "")
+                    if not email or not password:
+                        _LOGGER.error("Scheduler: credentials not set")
+                        continue
+                    if action == "set_home":
+                        result = await set_home_limit(email, password, value)
+                    elif action == "set_away":
+                        result = await set_away_limit(email, password, value)
+                    elif action == "set_bypass":
+                        result = await set_bypass_time(email, password, value)
+                    elif action == "set_auto_away":
+                        result = await set_auto_away(email, password, value)
+                    else:
+                        result = {"ok": False, "error": f"Unknown action {action}"}
+                    _LOGGER.info("Scheduler result: %s", result)
+                except Exception as exc:
+                    _LOGGER.exception("Scheduler error: %s", exc)
+
+        fired_today = {k for k in fired_today if k[0] == today_key}
+        await asyncio.sleep(60 - datetime.now(TZ).second)
+
+
+async def handle_schedule(request: web.Request) -> web.Response:
+    """Return the current schedule and server time."""
+    now = datetime.now(TZ)
+    return _ok({
+        "ok": True,
+        "server_time_pacific": now.strftime("%Y-%m-%d %H:%M:%S %Z"),
+        "schedule": [
+            {"time": f"{h:02d}:{m:02d} Pacific", "action": a, "value": v}
+            for h, m, a, v in SCHEDULE
+        ],
+    })
+
+
+async def _start_scheduler(app):
+    app["scheduler"] = asyncio.create_task(_run_scheduler())
+
+
+async def _stop_scheduler(app):
+    app["scheduler"].cancel()
+    with suppress(asyncio.CancelledError):
+        await app["scheduler"]
+
 def create_app():
     app = web.Application()
     app.router.add_get("/ping",              handle_ping)
@@ -465,6 +541,9 @@ def create_app():
     app.router.add_get("/set_bypass",        handle_set_bypass)
     app.router.add_get("/set_auto_away",     handle_set_auto_away)
     app.router.add_get("/set_sensitivity",   handle_set_sensitivity)
+    app.router.add_get("/schedule",          handle_schedule)
+    app.on_startup.append(_start_scheduler)
+    app.on_cleanup.append(_stop_scheduler)
     return app
 
 
