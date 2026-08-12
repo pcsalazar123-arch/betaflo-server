@@ -2,8 +2,8 @@ name: BetaFlo Schedule
 
 on:
   schedule:
-    - cron: '0 13 * * *'
-    - cron: '55 15 * * *'
+    - cron: '45 4 * * *'    # 9:45 PM PDT (04:45 UTC)
+    - cron: '0 13 * * *'    # 6:00 AM PDT (13:00 UTC)
   workflow_dispatch:
     inputs:
       job:
