@@ -2,7 +2,7 @@ name: BetaFlo Schedule
 
 on:
   schedule:
-    - cron: '45 4 * * *'
+    - cron: '0 13 * * *'
     - cron: '55 15 * * *'
   workflow_dispatch:
     inputs:
@@ -17,7 +17,7 @@ on:
 
 jobs:
   set-morning:
-    if: github.event.schedule == '55 15 * * *' || github.event.inputs.job == 'morning'
+    if: github.event.schedule == '0 13 * * *' || github.event.inputs.job == 'morning'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
