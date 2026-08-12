@@ -2,13 +2,22 @@ name: BetaFlo Schedule
 
 on:
   schedule:
-    - cron: '0 14 * * *'
     - cron: '45 5 * * *'
+    - cron: '0 14 * * *'
   workflow_dispatch:
+    inputs:
+      job:
+        description: 'Which job to run'
+        required: true
+        default: 'night'
+        type: choice
+        options:
+          - morning
+          - night
 
 jobs:
   set-morning:
-    if: github.event.schedule == '0 14 * * *'
+    if: github.event.schedule == '0 14 * * *' || github.event.inputs.job == 'morning'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -18,7 +27,7 @@ jobs:
         run: curl -s --max-time 120 "https://betaflo-server.onrender.com/set_home?minutes=45"
 
   set-night:
-    if: github.event.schedule == '45 5 * * *'
+    if: github.event.schedule == '45 5 * * *' || github.event.inputs.job == 'night'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
