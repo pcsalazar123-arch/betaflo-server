@@ -11,12 +11,16 @@ jobs:
     if: github.event.schedule == '0 14 * * *'
     runs-on: ubuntu-latest
     steps:
+      - name: Wake up server
+        run: curl -s --max-time 120 "https://betaflo-server.onrender.com/ping"
       - name: Set home limit to 45 min
-        run: curl -s "https://betaflo-server.onrender.com/set_home?minutes=45"
+        run: curl -s --max-time 60 "https://betaflo-server.onrender.com/set_home?minutes=45"
 
   set-night:
     if: github.event.schedule == '45 5 * * *'
     runs-on: ubuntu-latest
     steps:
+      - name: Wake up server
+        run: curl -s --max-time 120 "https://betaflo-server.onrender.com/ping"
       - name: Set home limit to 7 min
-        run: curl -s "https://betaflo-server.onrender.com/set_home?minutes=7"
+        run: curl -s --max-time 60 "https://betaflo-server.onrender.com/set_home?minutes=7"
