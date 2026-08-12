@@ -1,0 +1,26 @@
+chedule
+
+on:
+  schedule:
+    - cron: '0 14 * * *'   # 6:00 AM Pacific (UTC-8) = 14:00 UTC
+    - cron: '45 5 * * *'   # 9:45 PM Pacific (UTC-8) = 05:45 UTC next day
+  workflow_dispatch:         # allows manual trigger from GitHub for testing
+
+jobs:
+  set-morning:
+    if: github.event.schedule == '0 14 * * *'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set home limit to 45 min (Morning)
+        run: |
+          curl -s "https://betaflo-server.onrender.com/set_home?minutes=45"
+          echo "Morning schedule fired - home limit set to 45 min"
+
+  set-night:
+    if: github.event.schedule == '45 5 * * *'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set home limit to 7 min (Night)
+        run: |
+          curl -s "https://betaflo-server.onrender.com/set_home?minutes=7"
+          echo "Night schedule fired - home limit set to 7 min"
