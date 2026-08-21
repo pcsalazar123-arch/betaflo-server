@@ -1,18 +1,29 @@
 """
 BetaFlo Middleman Server
 ========================
-Translates simple HTTP GET requests from your App Inventor app into
-SignalR WebSocket calls to FloLogic's cloud.
+Translates simple HTTP GET requests into SignalR WebSocket calls
+to FloLogic's cloud.
+
+Clients:
+  - BetaFlo Android app (MIT App Inventor) — for manual control only.
+    The app cannot do background scheduling; it sends commands when
+    the user opens it and presses a button.
+  - Render Cron Jobs — for automatic daily scheduling:
+      BetaFlo Morning: 6:00 AM PDT  → set_home?minutes=45
+      BetaFlo Night:   9:45 PM PDT  → set_home?minutes=7
+    Note: FloLogic requires the physical module to be actively connected
+    to the internet when a command is sent — it does not store pending
+    updates for offline devices.
 
 Endpoints:
   GET /ping                          - Health check
   GET /status                        - Current valve state
   GET /mode?value=home|away|bypass|off
-  GET /set_home?minutes=7
+  GET /set_home?minutes=45           - Daytime flow limit (45 min)
   GET /set_away?minutes=3
   GET /set_bypass?minutes=90
   GET /set_auto_away?hours=24
-  GET /set_sensitivity?value=0.5
+  GET /set_sensitivity?value=0.5  - Flow sensitivity, in oz (0.5 - 48)
 
 All return JSON: {"ok": true} on success or {"ok": false, "error": "..."}
 """
@@ -301,8 +312,8 @@ async def _state_change(ws, user, valve, fields: dict) -> None:
     # Patch our cached valve dict in place so a /status call right after this
     # reflects the change, since we no longer re-fetch on every request.
     valve.update(fields)
-    # Record this command for monitoring (e.g. confirming the phone-side
-    # scheduler actually fired, and when).
+    # Record this command for monitoring (e.g. confirming the Render
+    # cron job scheduler actually fired, and when).
     now = datetime.now(UTC)
     _last_command["action"] = ", ".join(f"{k}={v}" for k, v in fields.items())
     _last_command["params"] = fields
@@ -336,6 +347,7 @@ async def fetch_status(email, password):
             "away_limit_minutes": valve.get("awayIntervalTime"),
             "bypass_time_minutes": valve.get("bypassTime"),
             "auto_away_hours": valve.get("autoAwayTime"),
+            "flow_sensitivity_oz": valve.get("dripRate"),
             "temperature": valve.get("temperature"),
             "valve_name": (valve.get("valveFriendlyName")
                            or valve.get("combinedName") or "FloLogic"),
